@@ -170,6 +170,10 @@ Contract operations (deposit, withdraw, harvest) are initiated from the frontend
 
 ## Local Development
 
+Having trouble with local ports, Rust targets, database credentials, Redis,
+wallet setup, or migrations? See the [local development troubleshooting
+guide](docs/troubleshooting.md).
+
 ### Prerequisites
 
 - Node.js 22+

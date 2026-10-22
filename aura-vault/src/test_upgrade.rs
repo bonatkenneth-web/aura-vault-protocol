@@ -853,6 +853,7 @@ mod migration_data_integrity_tests {
             total_shares_pre_harvest,
             "[post-harvest] harvest must not mint or burn shares"
         );
+        let paused_before_upgrade = vault.is_paused();
 
         // Capture the share price BEFORE the upgrade so we can compare afterwards.
         // share_price_post_harvest = total_assets_post_harvest * precision / total_shares
@@ -925,6 +926,16 @@ mod migration_data_integrity_tests {
         let total_shares_post_upgrade =
             vault.balance_of(&alice) + vault.balance_of(&bob)
                 + vault.balance_of(&carol) + vault.balance_of(&dave);
+        assert_eq!(
+            total_shares_post_upgrade,
+            total_shares_post_harvest,
+            "[post-upgrade] total_shares must remain unchanged"
+        );
+        assert_eq!(
+            vault.is_paused(),
+            paused_before_upgrade,
+            "[post-upgrade] paused status must survive the code upgrade"
+        );
 
         let share_price_after_upgrade =
             share_price_scaled(vault.total_assets(), total_shares_post_upgrade, precision);

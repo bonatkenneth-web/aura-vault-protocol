@@ -1,5 +1,10 @@
 # Rust Integration Guide — Aura Vault Protocol
 
+> This guide targets the repository's Soroban contract SDK (`soroban-sdk =
+> "28"`). For Rust RPC clients, use the `soroban-client` crate and consult its
+> versioned API documentation; it is a separate client library from the
+> contract SDK. Never construct JSON-RPC transaction payloads from debug output.
+
 This guide explains how to invoke the Aura Vault smart contract from a Rust application using the `stellar-sdk` crate family. All contract functions, error-handling patterns, and network configuration are covered.
 
 ---
@@ -45,12 +50,8 @@ Add the following to your application's `Cargo.toml`. These are the canonical cr
 
 ```toml
 [dependencies]
-# Stellar base types and XDR serialisation
-stellar-base     = "0.7"
-stellar-xdr      = { version = "21", features = ["std"] }
-
-# Soroban client library — simulate and submit transactions
-soroban-client   = "1"
+# Soroban RPC client for Rust applications (not the on-chain contract SDK)
+soroban-client   = "0.6"
 
 # Async runtime
 tokio            = { version = "1", features = ["full"] }
@@ -67,7 +68,9 @@ thiserror        = "1"
 reqwest          = { version = "0.12", features = ["json"] }
 ```
 
-> **Note:** Use exact or pinned versions in production. The versions above are compatible with Soroban protocol 22 (`soroban-sdk = "22"`).
+> **Note:** Pin and review dependency versions before production deployment.
+> This repository's contracts use Soroban SDK 28; keep client SDK versions
+> aligned with the RPC protocol supported by your target network.
 
 ---
 
