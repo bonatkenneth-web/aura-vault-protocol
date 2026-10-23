@@ -8,8 +8,8 @@ use crate::errors::VaultError;
 ///
 /// All functions that mutate vault state require the caller to hold a valid
 /// Soroban authorization (`require_auth`). Read-only view functions (`total_assets`,
-/// `balance_of`, `is_paused`, `proposal_status`) do not require auth and are
-/// free to call.
+/// share accounting views, `balance_of`, `is_paused`, and `proposal_status`) do not
+/// require auth.
 ///
 /// # Event summary
 ///
@@ -352,6 +352,28 @@ pub trait AuraVaultTrait {
     ///
     /// - `env` — Soroban execution environment.
     fn total_assets(env: Env) -> i128;
+
+    /// Preview shares minted for `assets`, rounded down using the current ratio.
+    /// On an empty vault, assets convert to shares 1:1. This preview does not
+    /// apply deposit limits; query `max_deposit` for caller-specific limits.
+    fn preview_deposit(env: Env, assets: i128) -> Result<i128, VaultError>;
+
+    /// Preview underlying assets for `shares`, rounded down using the current ratio.
+    fn preview_withdraw(env: Env, shares: i128) -> Result<i128, VaultError>;
+
+    /// Convert underlying assets to shares using the current ratio, rounded down.
+    fn convert_to_shares(env: Env, assets: i128) -> Result<i128, VaultError>;
+
+    /// Convert shares to underlying assets using the current ratio, rounded down.
+    fn convert_to_assets(env: Env, shares: i128) -> Result<i128, VaultError>;
+
+    /// Maximum assets the caller can deposit under current pause, whitelist,
+    /// minimum-deposit, and TVL-cap settings. Returns 0 when deposits are disabled.
+    fn max_deposit(env: Env, caller: Address) -> i128;
+
+    /// Maximum underlying assets represented by the caller's shares. Returns 0
+    /// when the vault is uninitialized, paused, or the caller has no shares.
+    fn max_withdraw(env: Env, caller: Address) -> Result<i128, VaultError>;
 
     /// Returns the vault share balance for a given address.
     ///

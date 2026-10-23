@@ -33,6 +33,7 @@
 mod errors;
 mod interface;
 mod storage;
+mod share_math;
 mod governance;
 mod fee;
 
@@ -416,21 +417,11 @@ impl AuraVault {
 
             let total_shares = get_total_shares(&env);
 
-            // Compute shares to mint (checked arithmetic; overflow returns MathOverflow)
-            let new_shares: i128 = if total_shares == 0 || total_deposited == 0 {
-                amount
-            } else {
-                let numerator = amount
-                    .checked_mul(total_shares)
-                    .ok_or(VaultError::MathOverflow)?;
-                numerator
-                    .checked_div(total_deposited)
-                    .ok_or(VaultError::MathOverflow)?
-            };
-
-            if new_shares <= 0 {
-                return Err(VaultError::ZeroAmount);
-            }
+            let new_shares = share_math::deposit_shares(amount, total_shares, total_deposited)
+                .map_err(|error| match error {
+                    share_math::DepositMathError::ZeroAmount => VaultError::ZeroAmount,
+                    share_math::DepositMathError::Overflow => VaultError::MathOverflow,
+                })?;
 
             // CEI — Interaction: pull tokens from caller into vault
             let vault_addr = env.current_contract_address();
@@ -440,27 +431,26 @@ impl AuraVault {
 
             // Effects: write state after successful transfer
             let old_balance = get_balance(&env, &caller);
-            let new_balance = old_balance
-                .checked_add(new_shares)
-                .ok_or(VaultError::MathOverflow)?;
+            let (new_balance, new_total_shares) = share_math::deposit_transition(
+                old_balance,
+                total_shares,
+                new_shares,
+            )
+            .ok_or(VaultError::MathOverflow)?;
             set_balance(&env, &caller, new_balance);
             storage::set_user_checkpoint(&env, &caller, storage::get_cumulative_yps(&env));
             storage::set_user_pending_yield(&env, &caller, storage::get_user_pending_yield(&env, &caller));
-            let new_total_shares = total_shares
-                .checked_add(new_shares)
-                .ok_or(VaultError::MathOverflow)?;
             set_total_shares(&env, new_total_shares);
             let new_total_deposited = total_deposited
                 .checked_add(amount)
                 .ok_or(VaultError::MathOverflow)?;
-            set_total_deposited(&env, new_total_deposited);            let share_price: i128 = if new_total_shares > 0 {
-                new_total_deposited
-                    .checked_mul(10_000_000)
-                    .and_then(|v| v.checked_div(new_total_shares))
-                    .unwrap_or(0)
-            } else {
-                10_000_000 // 1:1 on empty vault
-            };
+            set_total_deposited(&env, new_total_deposited);
+            let share_price = share_math::scaled_share_price(
+                new_total_deposited,
+                new_total_shares,
+                10_000_000,
+            )
+            .unwrap_or(0);
             let timestamp = env.ledger().timestamp();
             env.events().publish(
                 (Symbol::new(&env, "deposit"), caller.clone(), amount),
@@ -561,26 +551,29 @@ impl AuraVault {
 
             let total_shares = get_total_shares(&env);
 
-            let numerator = shares
-                .checked_mul(total_deposited)
-                .ok_or(VaultError::MathOverflow)?;
-            let redeem_amount = numerator
-                .checked_div(total_shares)
-                .ok_or(VaultError::MathOverflow)?;
+            let redeem_amount = share_math::withdrawal_assets(
+                shares,
+                total_deposited,
+                total_shares,
+            )
+            .map_err(|error| match error {
+                share_math::WithdrawalMathError::Overflow => VaultError::MathOverflow,
+                share_math::WithdrawalMathError::InsufficientAssets => {
+                    VaultError::InsufficientUnderlying
+                }
+            })?;
 
             if redeem_amount <= 0 {
                 return Err(VaultError::ZeroAmount);
             }
-            if total_deposited < redeem_amount {
-                return Err(VaultError::InsufficientUnderlying);
-            }
-
             // CEI — Effects: burn shares before any token transfer
-            let new_balance = user_balance - shares;
+            let (new_balance, new_total_shares) = share_math::withdraw_transition(
+                user_balance,
+                total_shares,
+                shares,
+            )
+            .ok_or(VaultError::MathOverflow)?;
             set_balance(&env, &caller, new_balance);
-            let new_total_shares = total_shares
-                .checked_sub(shares)
-                .ok_or(VaultError::MathOverflow)?;
             set_total_shares(&env, new_total_shares);
             storage::set_user_checkpoint(&env, &caller, storage::get_cumulative_yps(&env));
             storage::set_user_pending_yield(&env, &caller, storage::get_user_pending_yield(&env, &caller));
@@ -633,14 +626,13 @@ impl AuraVault {
             let vault_addr = env.current_contract_address();
             let pre_withdraw_balance = token.balance(&vault_addr);
             token.transfer(&vault_addr, &caller, &redeem_amount);
-            assert_outgoing_transfer(&token, &vault_addr, pre_withdraw_balance, redeem_amount)?;            let share_price: i128 = if new_total_shares > 0 {
-                new_total_deposited
-                    .checked_mul(10_000_000)
-                    .and_then(|v| v.checked_div(new_total_shares))
-                    .unwrap_or(0)
-            } else {
-                0 // vault is empty after full withdrawal
-            };
+            assert_outgoing_transfer(&token, &vault_addr, pre_withdraw_balance, redeem_amount)?;
+            let share_price = share_math::scaled_share_price(
+                new_total_deposited,
+                new_total_shares,
+                10_000_000,
+            )
+            .unwrap_or(0);
             let timestamp = env.ledger().timestamp();
             env.events().publish(
                 (Symbol::new(&env, "withdraw"), caller.clone(), shares),
@@ -2098,6 +2090,87 @@ impl AuraVault {
     // -----------------------------------------------------------------------
     pub fn total_shares(env: Env) -> i128 {
         get_total_shares(&env)
+    }
+
+    // -----------------------------------------------------------------------
+    // EIP-4626-style accounting views
+    // -----------------------------------------------------------------------
+
+    /// Shares minted for `assets`, rounded down like `deposit`.
+    pub fn preview_deposit(env: Env, assets: i128) -> Result<i128, VaultError> {
+        if assets < 0 {
+            return Err(VaultError::ZeroAmount);
+        }
+        let assets_total = get_total_deposited(&env);
+        let shares_total = get_total_shares(&env);
+        if assets_total == 0 || shares_total == 0 {
+            return Ok(assets);
+        }
+        share_math::shares_for_assets(assets, shares_total, assets_total)
+            .ok_or(VaultError::MathOverflow)
+    }
+
+    /// Assets redeemed for `shares`, rounded down like `withdraw`.
+    pub fn preview_withdraw(env: Env, shares: i128) -> Result<i128, VaultError> {
+        if shares < 0 {
+            return Err(VaultError::ZeroAmount);
+        }
+        let assets_total = get_total_deposited(&env);
+        let shares_total = get_total_shares(&env);
+        if shares_total == 0 {
+            return Ok(0);
+        }
+        share_math::assets_for_shares(shares, assets_total, shares_total)
+            .ok_or(VaultError::MathOverflow)
+    }
+
+    pub fn convert_to_shares(env: Env, assets: i128) -> Result<i128, VaultError> {
+        Self::preview_deposit(env, assets)
+    }
+
+    pub fn convert_to_assets(env: Env, shares: i128) -> Result<i128, VaultError> {
+        Self::preview_withdraw(env, shares)
+    }
+
+    /// Maximum amount the caller can deposit without the deposit call failing.
+    /// A zero TVL cap means unlimited capacity.
+    pub fn max_deposit(env: Env, caller: Address) -> i128 {
+        if get_admin(&env).is_none() || storage_is_paused(&env) {
+            return 0;
+        }
+        if get_whitelist_enabled(&env) && !storage::is_whitelisted(&env, &caller) {
+            return 0;
+        }
+
+        // `deposit` uses checked addition even when no TVL cap is configured.
+        let current = get_total_deposited(&env);
+        let arithmetic_limit = i128::MAX.saturating_sub(current).max(0);
+        let cap = get_tvl_cap(&env);
+        let available = if cap > 0 {
+            arithmetic_limit.min(cap.saturating_sub(current).max(0))
+        } else {
+            arithmetic_limit
+        };
+        let min_deposit = get_min_deposit(&env);
+        if available == 0 || (min_deposit > 0 && available < min_deposit) {
+            0
+        } else {
+            available
+        }
+    }
+
+    /// Maximum underlying asset value represented by the caller's shares.
+    pub fn max_withdraw(env: Env, caller: Address) -> Result<i128, VaultError> {
+        if get_admin(&env).is_none() || storage_is_paused(&env) {
+            return Ok(0);
+        }
+        let user_shares = get_balance(&env, &caller);
+        let shares_total = get_total_shares(&env);
+        if shares_total == 0 {
+            return Ok(0);
+        }
+        share_math::assets_for_shares(user_shares, get_total_deposited(&env), shares_total)
+            .ok_or(VaultError::MathOverflow)
     }
 
     // -----------------------------------------------------------------------

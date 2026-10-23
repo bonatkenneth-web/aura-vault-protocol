@@ -1125,3 +1125,99 @@ fn test_events_emitted_on_full_flow() {
     let status = vault.operation_status(&op_id);
     assert_eq!(status, Some(soroban_sdk::String::from_str(&_env, "Executed")));
 }
+
+// ---------------------------------------------------------------------------
+// 23. EIP-4626-style accounting views — Issue #1278
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_share_views_use_one_to_one_ratio_for_empty_vault() {
+    let (env, vault, _admin, _token) = setup();
+    let user = Address::generate(&env);
+    assert_eq!(vault.preview_deposit(&1_234), 1_234);
+    assert_eq!(vault.preview_withdraw(&1_234), 0);
+    assert_eq!(vault.convert_to_shares(&1_234), 1_234);
+    assert_eq!(vault.convert_to_assets(&1_234), 0);
+    assert_eq!(vault.max_deposit(&user), i128::MAX);
+    assert_eq!(vault.max_withdraw(&user), 0);
+}
+
+#[test]
+fn test_preview_views_follow_current_share_ratio() {
+    let (env, vault, admin, token) = setup();
+    let alice = Address::generate(&env);
+    mint(&env, &token, &admin, &alice, 1_000_000);
+    vault.deposit(&alice, &1_000_000);
+
+    mint(&env, &token, &admin, &admin, 200_000);
+    vault.harvest(&admin, &200_000);
+
+    assert_eq!(vault.preview_deposit(&600_000), 500_000);
+    assert_eq!(vault.preview_withdraw(&250_000), 300_000);
+}
+
+#[test]
+fn test_share_conversion_views_match_preview_views() {
+    let (env, vault, admin, token) = setup();
+    let alice = Address::generate(&env);
+    mint(&env, &token, &admin, &alice, 1_000_000);
+    vault.deposit(&alice, &1_000_000);
+
+    assert_eq!(vault.convert_to_shares(&345_678), vault.preview_deposit(&345_678));
+    assert_eq!(vault.convert_to_assets(&234_567), vault.preview_withdraw(&234_567));
+}
+
+#[test]
+fn test_preview_views_reject_negative_amounts() {
+    let (_env, vault, _admin, _token) = setup();
+    assert_eq!(vault.try_preview_deposit(&-1), Err(Ok(VaultError::ZeroAmount)));
+    assert_eq!(vault.try_preview_withdraw(&-1), Err(Ok(VaultError::ZeroAmount)));
+}
+
+#[test]
+fn test_max_deposit_tracks_tvl_cap_and_minimum() {
+    let (env, vault, admin, token) = setup();
+    let user = Address::generate(&env);
+    vault.set_tvl_cap(&admin, &2_000_000);
+    vault.set_min_deposit(&admin, &100_000);
+    mint(&env, &token, &admin, &user, 1_500_000);
+    vault.deposit(&user, &1_500_000);
+
+    assert_eq!(vault.max_deposit(&user), 500_000);
+    vault.set_tvl_cap(&admin, &1_550_000);
+    assert_eq!(vault.max_deposit(&user), 0);
+}
+
+#[test]
+fn test_max_deposit_is_zero_when_paused() {
+    let (env, vault, admin, _token) = setup();
+    let user = Address::generate(&env);
+    assert!(vault.max_deposit(&user) > 0);
+    vault.pause(&admin);
+    assert_eq!(vault.max_deposit(&user), 0);
+}
+
+#[test]
+fn test_max_withdraw_uses_user_share_value_and_returns_zero_without_shares() {
+    let (env, vault, admin, token) = setup();
+    let alice = Address::generate(&env);
+    let stranger = Address::generate(&env);
+    mint(&env, &token, &admin, &alice, 1_000_000);
+    vault.deposit(&alice, &1_000_000);
+    mint(&env, &token, &admin, &admin, 200_000);
+    vault.harvest(&admin, &200_000);
+
+    assert_eq!(vault.max_withdraw(&stranger), 0);
+    assert_eq!(vault.max_withdraw(&alice), 1_200_000);
+}
+
+#[test]
+fn test_max_withdraw_is_zero_when_paused() {
+    let (env, vault, admin, token) = setup();
+    let user = Address::generate(&env);
+    mint(&env, &token, &admin, &user, 1_000_000);
+    vault.deposit(&user, &1_000_000);
+    vault.pause(&admin);
+
+    assert_eq!(vault.max_withdraw(&user), 0);
+}
