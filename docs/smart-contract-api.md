@@ -23,6 +23,7 @@ All token amounts are expressed in **stroops** (the smallest indivisible unit). 
 13. [withdraw_fees](#13-withdraw_fees)
 14. [total_fees_collected](#14-total_fees_collected)
 15. [total_assets](#15-total_assets)
+    - [Share accounting views](#151-share-accounting-views)
 16. [balance_of](#16-balance_of)
 17. [upgrade](#17-upgrade)
 18. [Governance Functions](#18-governance-functions)
@@ -773,6 +774,51 @@ stellar contract invoke \
   --id CONTRACT_ID \
   --network testnet \
   -- total_assets
+```
+
+---
+
+## 15.1 Share accounting views
+
+These read-only functions expose the vault's current asset-to-share ratio for
+integrators. Calculations round down, matching the vault's deposit and
+withdrawal accounting. On an empty vault, `preview_deposit` and
+`convert_to_shares` use a 1:1 ratio; a withdrawal preview on an empty vault
+returns 0.
+
+### Signatures
+
+```rust
+fn preview_deposit(env: Env, assets: i128) -> Result<i128, VaultError>
+fn preview_withdraw(env: Env, shares: i128) -> Result<i128, VaultError>
+fn convert_to_shares(env: Env, assets: i128) -> Result<i128, VaultError>
+fn convert_to_assets(env: Env, shares: i128) -> Result<i128, VaultError>
+fn max_deposit(env: Env, caller: Address) -> i128
+fn max_withdraw(env: Env, caller: Address) -> Result<i128, VaultError>
+```
+
+`preview_deposit` and `convert_to_shares` return the shares represented by an
+asset amount. `preview_withdraw` and `convert_to_assets` return the underlying
+asset value of a share amount. Negative amounts return `ZeroAmount`; checked
+arithmetic failures return `MathOverflow`. Conversion functions use the same
+current accounting ratio as their corresponding previews.
+
+`max_deposit` reports the largest deposit accepted for the supplied caller,
+accounting for the TVL cap, minimum deposit, deposit whitelist, and pause
+status. A TVL cap of 0 means there is no configured cap. It returns 0 when the
+caller cannot deposit or the vault is paused. `max_withdraw` returns the
+underlying asset value of the caller's shares, or 0 when the vault is
+uninitialized, paused, or the caller has no shares.
+
+These functions are read-only and do not require authorization.
+
+### Examples
+
+```bash
+stellar contract invoke --id CONTRACT_ID --network testnet -- preview_deposit --assets 10000000
+stellar contract invoke --id CONTRACT_ID --network testnet -- convert_to_assets --shares 10000000
+stellar contract invoke --id CONTRACT_ID --network testnet -- max_deposit --caller GDEPOSITOR_ADDRESS
+stellar contract invoke --id CONTRACT_ID --network testnet -- max_withdraw --caller GDEPOSITOR_ADDRESS
 ```
 
 ---
